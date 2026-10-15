@@ -17,11 +17,11 @@
 # ---------------------------------------------------------------------------- #
 
 # Adapted from https://github.com/vllm-project/vllm/blob/23c1b10a4c8cd77c5b13afa9242d67ffd055296b/Dockerfile
-ARG CUDA_VERSION=12.1.1
+ARG CUDA_VERSION=12.8.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS builder
-ARG CUDA_VERSION=12.1.1
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
+ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.10
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
@@ -46,7 +46,7 @@ RUN conda create -y -n build python=3.10 pip setuptools wheel \
 WORKDIR /app
 
 # Build checkpoint store
-ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.9 9.0"
+ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.9 9.0 12.0"
 COPY sllm_store/requirements-build.txt /app/sllm_store/requirements-build.txt
 RUN cd sllm_store && \
   conda run -n build python -m pip install -r requirements-build.txt && \
@@ -76,7 +76,7 @@ COPY README.md /app/
 RUN conda run -n build python setup.py bdist_wheel
 
 # Stage 2: Runner with conda environments
-FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel
 
 # Set non-interactive installation
 ENV DEBIAN_FRONTEND=noninteractive \

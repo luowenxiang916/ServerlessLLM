@@ -91,7 +91,12 @@ def _compute_device_placement_from_map(
     """
 
     if isinstance(device_map, str):
-        no_split_modules = model._get_no_split_modules(device_map)
+        if hasattr(model, "_get_no_split_modules"):
+            no_split_modules = model._get_no_split_modules(device_map)
+        else:
+            # transformers>=5 removed the _get_no_split_modules helper;
+            # fall back to the class-level no-split module list.
+            no_split_modules = list(getattr(model, "_no_split_modules", []) or [])
         if device_map not in [
             "auto",
             "balanced",

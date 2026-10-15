@@ -29,13 +29,25 @@ AlignedBuffer::AlignedBuffer(const std::string& filename)
   if (fd_ < 0) {
     std::cerr << "Failed to open file " << filename << std::endl;
   }
-  buffer_ = aligned_alloc(kAlignment, kBufferSize);
+  buffer_ = aligned_alloc(kAlignment, kBufferSize + kAlignment);
 }
 
 AlignedBuffer::~AlignedBuffer() {
   // if the buffer is not written to file, write it to file
   if (buffer_ && buf_pos_) {
-    pwrite(fd_, buffer_, buf_pos_, file_offset_);
+    // O_DIRECT requires the transfer length (and file offset) to be
+    // kAlignment-aligned. The trailing partial buffer is not, so zero-pad it;
+    // the extra bytes are slack beyond the real tensor data and are ignored by
+    // the reader (tensor offsets/sizes come from tensor_index.json).
+    size_t aligned_size =
+        (buf_pos_ + kAlignment - 1) / kAlignment * kAlignment;
+    memset(static_cast<char*>(buffer_) + buf_pos_, 0, aligned_size - buf_pos_);
+    ssize_t ret = pwrite(fd_, buffer_, aligned_size, file_offset_);
+    if (ret < 0 || (size_t)ret != aligned_size) {
+      std::cerr << "Failed to flush tail of file, ret: " << ret
+                << " errno: " << errno << " (" << strerror(errno) << ")"
+                << std::endl;
+    }
   }
   if (buffer_) {
     free(buffer_);
@@ -104,8 +116,13 @@ size_t AlignedBuffer::writePadding(size_t padding_size) {
     std::cerr << "Padding size is too large" << std::endl;
     return 0;
   }
-  if (buf_pos_ == buf_size_) {
-    pwrite(fd_, buffer_, buf_pos_, file_offset_);
+  if (buf_pos_ >= buf_size_) {
+    ssize_t ret = pwrite(fd_, buffer_, buf_size_, file_offset_);
+    if (ret < 0 || (size_t)ret != buf_size_) {
+      std::cerr << "Failed to flush file, ret: " << ret
+                << " errno: " << errno << " (" << strerror(errno) << ")"
+                << std::endl;
+    }
     buf_pos_ = 0;
     file_offset_ += buf_size_;
   }

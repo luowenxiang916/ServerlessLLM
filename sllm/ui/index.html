@@ -133,9 +133,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
           <span>
             max_tokens
             <select id="maxtokens">
-              <option value="32">32</option>
-              <option value="128" selected>128</option>
               <option value="256">256</option>
+              <option value="1024" selected>1024</option>
+              <option value="4096">4096</option>
             </select>
           </span>
         </div>
@@ -458,6 +458,10 @@ button:disabled{opacity:.45;cursor:not-allowed}
       }
       var choice = (res.choices && res.choices[0]) || {};
       var content = (choice.message && choice.message.content) || "";
+      // `length` means the reply ran into the max_tokens limit: reasoning
+      // models spend most of the budget on the ` thinking` block, so the answer
+      // looks cut off. Say so instead of silently showing half a sentence.
+      var truncated = choice.finish_reason === "length";
       var metrics = res.sllm_metrics || null;
       if (metrics) state.metrics[name] = metrics;
 
@@ -465,6 +469,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
         ? ("冷启动 " + fmt(metrics.disk_to_vram_s) + "s · 首字 " + fmt(metrics.ttft_s) + "s" +
            (metrics.from_disk ? " · 走了 SSD" : " · 内存池命中"))
         : null;
+      if (truncated) {
+        meta = (meta ? meta + " · " : "") + "达到 max_tokens 上限，回答被截断";
+      }
       var item = { role: "assistant", content: content, meta: meta };
       history.push(item);
       renderChat();
@@ -472,6 +479,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       renderMetrics();
       renderModels();
       refresh();
+      if (truncated) toast("回答达到 max_tokens 上限被截断，把右上角的 max_tokens 调大即可");
     }).catch(function (e) {
       if (stop) stop();
       history.push({ role: "assistant", content: "[请求失败] " + e.message });

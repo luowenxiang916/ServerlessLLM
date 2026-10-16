@@ -31,6 +31,12 @@ class AlignedBuffer {
   size_t writeData(const void* data, size_t size);
   size_t writePadding(size_t padding_size);
 
+  // Flush the (possibly partial) buffer, zero-padding it up to kAlignment so
+  // that O_DIRECT is satisfied. Returns the number of padding bytes that were
+  // appended beyond the buffered data, which callers need in order to keep
+  // their own file-offset bookkeeping in sync with the on-disk length.
+  size_t finalize();
+
  private:
   int fd_;
   size_t buf_size_;

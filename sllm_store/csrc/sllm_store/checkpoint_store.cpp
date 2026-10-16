@@ -180,6 +180,24 @@ int CheckpointStore::LoadModelFromDiskAsync(const std::string& model_path) {
   return 0;
 }
 
+int CheckpointStore::WaitModelInHost(const std::string& model_path,
+                                     int64_t timeout_ms) {
+  std::unique_lock<std::mutex> lock_info(model_info_mutex_);
+  auto model = GetModelPtr(model_path);
+  lock_info.unlock();
+  if (model == nullptr) {
+    return -1;
+  }
+
+  int ret = model->WaitInHost(timeout_ms);
+  if (ret != 0) {
+    LOG(ERROR) << "Model " << model_path << " is not ready in host memory";
+    return ret;
+  }
+
+  return 0;
+}
+
 int CheckpointStore::LoadModelFromMem(
     const std::string& model_path, const std::string& replica_uuid,
     const MemCopyHandleListMap& gpu_memory_handles,

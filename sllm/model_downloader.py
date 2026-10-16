@@ -28,6 +28,26 @@ from transformers import AutoTokenizer
 logger = logging.getLogger("ray")
 
 
+def resolve_local_model_path(
+    model_name: str, pretrained_model_name_or_path: Optional[str] = None
+) -> Optional[str]:
+    """Return a local directory holding ``model_name``, or None if absent.
+
+    Upstream only checks whether ``pretrained_model_name_or_path`` happens to
+    be a path, so an already-present local copy (e.g. under
+    ``LOCAL_MODEL_ROOT``) still triggers a fresh Hub download. Prefer local
+    copies; the Hub is only used as a last resort.
+    """
+    candidates = [pretrained_model_name_or_path, model_name]
+    local_root = os.getenv("LOCAL_MODEL_ROOT", "")
+    if local_root:
+        candidates.append(os.path.join(local_root, model_name))
+    for candidate in candidates:
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    return None
+
+
 # def get_directory_size(directory):
 #     total_size = 0
 #     for dirpath, dirnames, filenames in os.walk(directory):
@@ -65,13 +85,20 @@ def download_transformers_model(
 
     module = importlib.import_module("transformers")
     hf_model_cls = getattr(module, hf_model_class)
+    source = (
+        resolve_local_model_path(model_name, pretrained_model_name_or_path)
+        or pretrained_model_name_or_path
+    )
+    if source != pretrained_model_name_or_path:
+        logger.info(f"Using local copy at {source}")
+
     model = hf_model_cls.from_pretrained(
-        pretrained_model_name_or_path,
+        source,
         torch_dtype=torch_dtype,
         trust_remote_code=True,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(source)
 
     from sllm_store.transformers import save_model
 
@@ -182,8 +209,12 @@ class VllmModelDownloader:
 
         cache_dir = TemporaryDirectory()
         try:
-            if os.path.exists(pretrained_model_name_or_path):
-                input_dir = pretrained_model_name_or_path
+            source = resolve_local_model_path(
+                model_name, pretrained_model_name_or_path
+            )
+            if source is not None:
+                logger.info(f"Using local copy at {source}")
+                input_dir = source
             else:
                 # download from huggingface
                 input_dir = snapshot_download(
@@ -204,7 +235,11 @@ class VllmModelDownloader:
                 download_dir=input_dir,
                 dtype=torch_dtype,
                 tensor_parallel_size=tensor_parallel_size,
-                num_gpu_blocks_override=1,
+                # No num_gpu_blocks_override here: the conversion run only
+                # loads the weights and dumps them, so letting vLLM size the
+                # (unused) KV cache from gpu_memory_utilization is fine. Pinning
+                # it to a single block breaks hybrid-attention models, whose
+                # smallest KV allocation is already bigger than one block.
                 enforce_eager=True,
                 max_model_len=1,
             )
@@ -215,20 +250,32 @@ class VllmModelDownloader:
                 path=model_path, pattern=pattern, max_size=max_size
             )
             for file in os.listdir(input_dir):
-                # Copy the metadata files into the output directory
-                if os.path.splitext(file)[1] not in (
+                # Copy the metadata files into the output directory. Skip
+                # hidden entries: those are tooling leftovers (.msc/.mv from
+                # ModelScope, ._____temp/ upload dirs) that often belong to
+                # another user, and a failed copy would throw away the weights
+                # that were just written.
+                if file.startswith("."):
+                    continue
+                if os.path.splitext(file)[1] in (
                     ".bin",
                     ".pt",
                     ".safetensors",
                 ):
-                    src_path = os.path.join(input_dir, file)
-                    dest_path = os.path.join(model_path, file)
-                    logger.info(src_path)
-                    logger.info(dest_path)
+                    continue
+                src_path = os.path.join(input_dir, file)
+                dest_path = os.path.join(model_path, file)
+                logger.info(src_path)
+                logger.info(dest_path)
+                try:
                     if os.path.isdir(src_path):
                         shutil.copytree(src_path, dest_path)
                     else:
                         shutil.copy(src_path, dest_path)
+                except OSError as e:
+                    logger.warning(
+                        f"Skipping metadata file {src_path}: {e}"
+                    )
             del model_executer
             del llm_writer
             gc.collect()

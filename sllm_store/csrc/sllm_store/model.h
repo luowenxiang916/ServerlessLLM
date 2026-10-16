@@ -57,7 +57,10 @@ class Model {
   int ToGpu(const std::string& replica_uuid, const MemPtrListMap& device_ptrs,
             const std::unordered_map<int, MemCopyChunkList>& mem_copy_chunks,
             const std::unordered_map<int, MemCopyHandleList>& mem_copy_handles);
-  int WaitInHost();
+  // Wait until the model is resident in host (pinned) memory.
+  // timeout_ms <= 0 means wait forever.
+  // Returns 0 on success, 1 on failure, -1 on timeout.
+  int WaitInHost(int64_t timeout_ms = 0);
   int WaitInGpu(const std::string& replica_uuid);
   int FreeGpu(const std::string& replica_uuid);
   int FreeHost();

@@ -46,6 +46,10 @@ class CheckpointStore {
   int64_t RegisterModelInfo(const std::string& model_path);
   int LoadModelFromDisk(const std::string& model_path);
   int LoadModelFromDiskAsync(const std::string& model_path);
+  // Block until the model is resident in the host pinned-memory pool.
+  // Returns 0 when ready, 1 on failure, -1 if the model is unknown or the
+  // wait timed out. timeout_ms <= 0 waits forever.
+  int WaitModelInHost(const std::string& model_path, int64_t timeout_ms = 0);
   int LoadModelFromMem(const std::string& model_path,
                        const std::string& replica_uuid,
                        const MemCopyHandleListMap& gpu_memory_handles,

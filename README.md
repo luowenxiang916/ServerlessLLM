@@ -137,6 +137,117 @@ curl http://127.0.0.1:8343/v1/chat/completions \
 
 ---
 
+## 🖥️ Single-Machine Bare-Metal Deployment (Local Fork)
+
+This fork runs **without Docker** on a single bare-metal server that cold-starts
+multiple small models on a shared set of GPUs. The `Dockerfile` and
+`docker-compose.yml` in this repo are from an earlier attempt and are **not used**
+by the current workflow.
+
+| Script | Status | Description |
+| --- | --- | --- |
+| `start-single.sh` | ✅ **Current** | Starts 1 Ray head (no GPU) + 1 Ray worker owning all GPUs (e.g. `4,5,6,7`), then `sllm-store` on `8073` and the SLLM API on `8343`. |
+| `stop-cluster.sh` | ✅ **Current** | Stops the SLLM API, the store, and Ray. |
+| `start-cluster.sh` | ⚠️ **Not currently used** | Earlier variant that launches **one Ray worker + one store per GPU**, each bound to its own loopback IP (`127.0.0.N:8073`). Kept for reference; superseded by `start-single.sh`. |
+
+```bash
+GPUS="4,5,6,7" MODEL_FOLDER=$HOME/models ./start-single.sh   # ~40s to become ready
+ss -ltn | grep -E '8073|8343|6379'                           # all three must be LISTEN
+
+export LLM_SERVER_URL=http://127.0.0.1:8343
+export NO_PROXY=127.0.0.1,localhost                          # required, see notes
+.venv-head/bin/sllm deploy --model Qwen/Qwen3-0.6B --backend transformers
+```
+
+**Notes**
+
+- `NO_PROXY=127.0.0.1,localhost` is mandatory; without it local requests are captured by the proxy and fail with `502`.
+- After changing any Python code (`vllm_backend.py`, `device_map_utils.py`, ...) or rebuilding the `.so`, re-run `start-single.sh` -- worker actors load code at startup.
+- Only GPUs `4,5,6,7` are used; `0-3` are isolated via `CUDA_VISIBLE_DEVICES` inside `start-single.sh`.
+
+### Web console
+
+The API serves a small console on the same port (three columns: models, chat,
+and the cold-start breakdown for the current model).
+
+```text
+http://<server>:8343/           # the console
+http://<server>:8343/ui/state   # the aggregated state it polls
+```
+
+Select a model on the left, then *加载* to force (and measure) one cold start,
+or simply send a message. Every `/v1/chat/completions` response carries:
+
+| field | meaning |
+| --- | --- |
+| `disk_to_host_s` | SSD → pinned host memory pool (`~0` when the model is already pooled) |
+| `mem_to_vram_s` | host pool → GPU |
+| `disk_to_vram_s` | SSD → GPU, end to end |
+| `ttft_s` | API request received → first generated token |
+| `from_disk` | `true` when this request really read from storage |
+
+All three transfer numbers are measured by the store while it pages the
+weights in, so both backends report them in the same way. The store pipelines
+disk -> host and host -> VRAM chunk by chunk, which shows up in the numbers:
+
+- weights really come from SSD (`from_disk: true`): the copy to VRAM overlaps
+  with the read, so `mem_to_vram_s` is close to zero and `disk_to_vram_s` is
+  the number to quote;
+- weights are already in the pinned pool (`from_disk: false`):
+  `disk_to_host_s` is the no-op and `mem_to_vram_s` is the real host -> VRAM
+  time.
+
+Measured with Qwen3.6-35B-A3B (70 GB, TP=4) on the 4x RTX 5090 setup:
+
+| case | `disk_to_host_s` | `mem_to_vram_s` | `disk_to_vram_s` | `ttft_s` |
+| --- | --- | --- | --- | --- |
+| cold start, from SSD | 79.5 | ~0.0 | 79.5 | 171.0 |
+| already pooled | ~0.0 | 0.6 | 0.6 | 88.5 |
+
+`ttft_s` contains the two transfers *plus* the per-instance cold start (Ray
+actor, vLLM engine warm-up: `torch.compile`, CUDA graph capture, MoE kernel
+build), which is what the remaining ~88 s goes into. Moving 70 GB to the GPUs
+over PCIe takes well under a second; what actually costs time is reading it
+from storage and then warming the engine up.
+
+vLLM loads the weights inside its own EngineCore process while the metrics are
+reported by the backend actor, so the store writes the stage timings of a load
+to `$TMPDIR/sllm_load_timings/<model>_rank_<n>.json` and the actor reads them
+back once its engine is up.
+
+Console endpoints: `GET /ui/state`, `POST /ui/deploy`
+(`{"model": "...", "backend": "transformers"}`, same defaults as `sllm deploy`),
+`POST /unload` (`{"model": "..."}` -- drops the DRAM copy, keeps the SSD one)
+and `GET /store/status`. The pinned pool lives inside `sllm-store` and has no
+query API, so "内存驻留" is inferred by the API process.
+
+### Two copies of every package
+
+`sllm` and `sllm_store` are installed as **copies** in the venvs, and which copy
+is imported depends on how the process was started:
+
+| process | `sllm` | `sllm_store` |
+| --- | --- | --- |
+| `sllm start` (API) | `.venv-head/.../site-packages/sllm` | `.venv-head/.../site-packages/sllm_store` |
+| `sllm-store start` (store) | – | `.venv-worker/.../site-packages/sllm_store` |
+| Ray worker actors (backend) | repo checkout | repo checkout |
+
+So after editing either package, sync the copies and restart:
+
+```bash
+VP=.venv-head/lib/python3.10/site-packages        # and .venv-worker/... for sllm_store
+cp -rf sllm/. $VP/sllm/
+cp -f sllm_store/sllm_store/{transformers,server,client}.py $VP/sllm_store/
+
+# rebuild the C++ extension (`wait_model_in_host` etc.)
+cd sllm_store/build/temp.linux-x86_64-cpython-310
+CUDA_HOME=/usr/local/cuda-13.2 cmake --build . --target _checkpoint_store -j
+cp -f ../lib.linux-x86_64-cpython-310/sllm_store/_checkpoint_store*.so \
+      ../../../$VP/sllm_store/
+```
+
+---
+
 ## 💡 Use the Fast Loader in Your Code
 
 Use ServerlessLLM Store standalone to speed up torch-based model loading.

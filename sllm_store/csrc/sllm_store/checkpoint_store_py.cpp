@@ -43,6 +43,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("load_model_from_disk_async",
            &CheckpointStore::LoadModelFromDiskAsync, py::arg("model_path"),
            "Load a model from disk asynchronously.")
+      .def("wait_model_in_host", &CheckpointStore::WaitModelInHost,
+           py::arg("model_path"), py::arg("timeout_ms") = 0,
+           py::call_guard<py::gil_scoped_release>(),
+           "Wait for a model to be available in host (pinned) memory.")
       .def(
           "load_model_from_mem_async",
           [](CheckpointStore& cs, const std::string& model_path,
@@ -69,10 +73,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Load a model from memory asynchronously.")
       .def("wait_model_in_gpu", &CheckpointStore::WaitModelInGpu,
            py::arg("model_path"), py::arg("replica_uuid"),
+           // This call blocks on a condition variable until the host -> device
+           // copy finishes. Without releasing the GIL the whole store process
+           // (including the gRPC event loop) freezes for the duration of the
+           // copy, which makes every other in-flight RPC time out.
+           py::call_guard<py::gil_scoped_release>(),
            "Wait for a model to be available in GPU memory.")
       .def("unload_model_from_host", &CheckpointStore::UnloadModelFromHost,
-           py::arg("model_path"), "Unload a model from the host memory.")
+           py::arg("model_path"),
+           // `Model::FreeHost` waits for an in-flight host / device copy to
+           // finish, so this can block for as long as a model load takes.
+           // Holding the GIL here would freeze the whole store process.
+           py::call_guard<py::gil_scoped_release>(),
+           "Unload a model from the host memory.")
       .def("clear_mem", &CheckpointStore::ClearMem,
+           py::call_guard<py::gil_scoped_release>(),
            "Clear all allocated memory.")
       .def("get_mem_pool_size", &CheckpointStore::GetMemPoolSize,
            "Get the memory pool size.")

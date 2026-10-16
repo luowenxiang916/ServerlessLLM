@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ServerlessLLM 控制台</title>
+<style>
+:root{
+  --red:#900000; --red-2:#6d0000; --red-soft:#fdf3f3; --red-line:#e8cfcf;
+  --ink:#1b1b1b; --muted:#6a6a6a; --line:#e3e3e3; --surface:#fff;
+  --canvas:#faf8f7; --chip:#f3f1f0; --ok:#1c7a3e; --warn:#9a6b00;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  color:var(--ink);font-size:14px;line-height:1.5;background:#f4f2f1;
+  padding:18px;display:flex;
+}
+.screen{
+  background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.10);
+  width:100%;max-width:1400px;margin:auto;display:flex;flex-direction:column;min-height:0;
+}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--red);color:#fff;padding:12px 16px}
+.brand{font-weight:500;letter-spacing:.2px}
+.brand b{font-weight:700}
+.brand .sub{opacity:.78;font-size:12px;margin-left:8px}
+.conn{font-size:12px;display:flex;align-items:center;gap:6px;opacity:.95}
+.dot{width:7px;height:7px;border-radius:50%;background:#7ee2a6;box-shadow:0 0 0 3px rgba(126,226,166,.25)}
+.dot.bad{background:#ffc9c9;box-shadow:0 0 0 3px rgba(255,201,201,.25)}
+.cols-3{display:grid;grid-template-columns:minmax(230px,1fr) minmax(0,2.4fr) minmax(280px,1.35fr);flex:1;min-height:0}
+.col{padding:14px;min-width:0;display:flex;flex-direction:column}
+.col + .col{border-left:1px solid var(--line)}
+.sec-title{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin:0 0 10px;display:flex;justify-content:space-between;align-items:center}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:10px 11px}
+.mcard{cursor:pointer;position:relative;margin-bottom:10px;border-left:3px solid transparent;transition:border-color .15s,background .15s}
+.mcard:hover{background:var(--canvas)}
+.mcard.sel{border-left-color:var(--red);background:var(--red-soft)}
+.mname{font-weight:500;font-size:13px;word-break:break-all}
+.mmeta{font-size:12px;color:var(--muted);margin-top:3px}
+.badges{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.badge{font-size:11px;padding:2px 7px;border-radius:999px;background:var(--chip);color:var(--muted);border:1px solid var(--line)}
+.badge.on{background:#eaf6ef;color:var(--ok);border-color:#cbe6d5}
+.badge.off{background:#f6f4f2;color:#8a8a8a}
+.badge.warm{background:var(--red-soft);color:var(--red);border-color:var(--red-line)}
+.row{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
+button{font:inherit;font-size:12px;border-radius:7px;border:1px solid var(--line);background:#fff;color:var(--ink);padding:5px 10px;cursor:pointer}
+button:hover{background:var(--canvas)}
+button.primary{background:var(--red);border-color:var(--red);color:#fff}
+button.primary:hover{background:var(--red-2);border-color:var(--red-2)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.ghost-link{background:none;border:none;color:var(--red);padding:2px 0;cursor:pointer;font-size:12px}
+.models{overflow:auto;flex:1;min-height:0}
+.deploy{margin-top:10px;border-top:1px dashed var(--line);padding-top:10px}
+.deploy .line{display:flex;gap:6px;margin-top:6px}
+.deploy input,.deploy select{font:inherit;font-size:12px;padding:5px 7px;border:1px solid var(--line);border-radius:7px;min-width:0;flex:1;background:#fff;color:var(--ink)}
+.chat{display:flex;flex-direction:column;height:100%;min-height:340px}
+.chat-head{border-bottom:1px solid var(--line);padding-bottom:9px;margin-bottom:10px;font-size:13px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.chat-head .m{color:var(--red);font-weight:500}
+.chat-head select{font:inherit;font-size:12px;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+.log{flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px;padding-right:2px}
+.msg{max-width:88%;padding:8px 11px;border-radius:11px;font-size:13px;white-space:pre-wrap;word-break:break-word}
+.msg.user{align-self:flex-end;background:var(--red);color:#fff;border-bottom-right-radius:3px}
+.msg.bot{align-self:flex-start;background:var(--canvas);border:1px solid var(--line);border-bottom-left-radius:3px}
+.msg.err{align-self:flex-start;background:#fdf3f3;border:1px solid var(--red-line);color:var(--red)}
+.msg .who{display:block;font-size:11px;opacity:.72;margin-bottom:3px}
+.msg .meta{display:block;font-size:11px;opacity:.7;margin-top:6px;font-variant-numeric:tabular-nums}
+.msg .think{color:var(--muted)}
+.hint{color:var(--muted);font-size:12px;padding:2px 0}
+.composer{display:flex;gap:8px;margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+.composer input{flex:1;font:inherit;font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);min-width:0}
+.composer input:focus{outline:none;border-color:var(--red);box-shadow:0 0 0 3px rgba(144,0,0,.10)}
+.stat{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:9px 0;border-bottom:1px dashed var(--line)}
+.stat:last-child{border-bottom:none}
+.stat .k{font-size:12px;color:var(--muted)}
+.stat .k b{display:block;color:var(--ink);font-size:13px;font-weight:500}
+.stat .v{font-variant-numeric:tabular-nums;font-size:22px;font-weight:500;color:var(--red);white-space:nowrap}
+.stat .v small{font-size:12px;color:var(--muted);font-weight:400;margin-left:2px}
+.stat .v.na{color:#a9a9a9;font-size:16px}
+.pipe{display:flex;align-items:center;margin:4px 0 12px}
+.node{font-size:11px;text-align:center;flex:0 0 auto}
+.node .box{width:46px;height:46px;border-radius:9px;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;background:var(--chip);color:var(--muted)}
+.node.on .box{background:var(--red-soft);border-color:var(--red-line);color:var(--red);font-weight:500}
+.node .cap{margin-top:4px;color:var(--muted)}
+.arrow{flex:1;height:2px;background:var(--line);position:relative;margin:0 4px;top:-9px}
+.arrow.live{background:var(--red)}
+.arrow .t{position:absolute;top:-15px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--red);font-variant-numeric:tabular-nums;white-space:nowrap}
+.bar{height:7px;border-radius:999px;background:var(--chip);overflow:hidden;margin-top:6px}
+.bar span{display:block;height:100%;background:var(--red);opacity:.85;transition:width .4s}
+.statusbar{border-top:1px solid var(--line);background:var(--canvas);padding:8px 16px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.statusbar b{color:var(--ink);font-weight:500}
+.toast{margin:0 0 10px;padding:8px 10px;border-radius:8px;font-size:12px;background:var(--red-soft);border:1px solid var(--red-line);color:var(--red)}
+.toast[hidden]{display:none}
+.dotpulse{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--red);margin-right:6px;animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
+@media (max-width:900px){
+  .cols-3{grid-template-columns:1fr}
+  .col + .col{border-left:none;border-top:1px solid var(--line)}
+}
+</style>
+</head>
+<body>
+<div class="screen">
+  <div class="topbar">
+    <div class="brand"><b>ServerlessLLM</b><span class="sub">单机多模型控制台 · SSD → 内存 → 显存</span></div>
+    <div class="conn"><span class="dot" id="dot"></span><span id="conn">连接中…</span></div>
+  </div>
+
+  <div class="cols-3">
+    <div class="col">
+      <h3 class="sec-title"><span>模型</span><button class="ghost-link" id="refresh">刷新</button></h3>
+      <div class="models" id="models"><div class="hint">加载中…</div></div>
+      <div class="deploy">
+        <div class="hint">部署新模型（首次需下载并转换到 SSD）</div>
+        <div class="line">
+          <input id="deploy-name" placeholder="Qwen/Qwen2.5-0.5B-Instruct" />
+        </div>
+        <div class="line">
+          <select id="deploy-backend">
+            <option value="transformers">transformers</option>
+            <option value="vllm">vllm</option>
+          </select>
+          <button class="primary" id="deploy">部署</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="chat">
+        <div class="chat-head">
+          <span>对话 · <span class="m" id="chatmodel">—</span></span>
+          <span>
+            max_tokens
+            <select id="maxtokens">
+              <option value="32">32</option>
+              <option value="128" selected>128</option>
+              <option value="256">256</option>
+            </select>
+          </span>
+        </div>
+        <div class="toast" id="toast" hidden></div>
+        <div class="log" id="log"></div>
+        <div class="composer">
+          <input id="input" placeholder="输入消息…（Enter 发送）" autocomplete="off" />
+          <button class="primary" id="send">发送</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <h3 class="sec-title"><span>本次冷启动指标</span><span id="metricmodel" style="text-transform:none;letter-spacing:0"></span></h3>
+      <div id="metrics"></div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span id="storebar">内存池 —</span>
+    <span id="endpoint"></span>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var state = { models: [], selected: null, metrics: {}, busy: false };
+  var chats = {};      // model -> [{role, content}]
+  var API = "";
+  var renderedChatFor = null;
+
+  function $(id) { return document.getElementById(id); }
+
+  function fmt(v, digits) {
+    if (v === null || v === undefined) return "—";
+    return Number(v).toFixed(digits === undefined ? 2 : digits);
+  }
+
+  function gb(bytes) {
+    if (bytes === null || bytes === undefined) return "—";
+    return (bytes / 1024 / 1024 / 1024).toFixed(2);
+  }
+
+  function sizeLabel(bytes) {
+    if (!bytes) return "";
+    var g = bytes / 1024 / 1024 / 1024;
+    if (g >= 1) return g.toFixed(2) + " GB";
+    return (bytes / 1024 / 1024).toFixed(0) + " MB";
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  var toastTimer = null;
+  function toast(msg) {
+    var el = $("toast");
+    el.textContent = msg;
+    el.hidden = false;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.hidden = true; }, 8000);
+  }
+
+  function api(path, options) {
+    return fetch(API + path, options).then(function (r) {
+      return r.text().then(function (t) {
+        var data = null;
+        try { data = t ? JSON.parse(t) : null; } catch (e) { data = null; }
+        if (!r.ok) {
+          var detail = data && (data.detail || data.error);
+          throw new Error(detail || (path + " 返回 " + r.status));
+        }
+        return data;
+      });
+    });
+  }
+
+  function post(path, body) {
+    return api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  }
+
+  function setConn(ok, text) {
+    $("dot").className = "dot" + (ok ? "" : " bad");
+    $("conn").textContent = text;
+  }
+
+  // One in-flight request at a time keeps the cold-start numbers meaningful.
+  function setBusy(on) {
+    state.busy = on;
+    $("send").disabled = on;
+    $("input").disabled = on;
+  }
+
+  // ---------- rendering ----------
+
+  function modelByName(name) {
+    for (var i = 0; i < state.models.length; i++) {
+      if (state.models[i].name === name) return state.models[i];
+    }
+    return null;
+  }
+
+  function renderModels() {
+    var box = $("models");
+    if (!state.models.length) {
+      box.innerHTML = '<div class="hint">还没有模型。先在下面输入模型名部署（Qwen/Qwen3-0.6B）。</div>';
+      return;
+    }
+    var html = "";
+    state.models.forEach(function (m) {
+      var sel = m.name === state.selected ? " sel" : "";
+      var badges = '<span class="badge ' + (m.on_disk ? "on" : "off") + '">SSD</span>' +
+        '<span class="badge ' + (m.in_host ? "on" : "off") + '">内存池</span>' +
+        (m.deployed ? '<span class="badge warm">已部署</span>' : '<span class="badge off">未部署</span>');
+      var meta = (m.backend || "transformers") +
+        (m.size ? " · " + sizeLabel(m.size) : "") +
+        (m.in_host ? " · 内存驻留" : " · 需读盘");
+      html += '<div class="card mcard' + sel + '" data-model="' + escapeHtml(m.name) + '">' +
+        '<div class="mname">' + escapeHtml(m.name) + "</div>" +
+        '<div class="mmeta">' + escapeHtml(meta) + "</div>" +
+        '<div class="badges">' + badges + "</div>" +
+        '<div class="row">' +
+        '<button class="primary" data-act="load"' + (m.deployed ? "" : " disabled") + ' title="发送一个最小请求强制冷启动，并测量三级加载耗时">加载</button>' +
+        '<button data-act="unload"' + (m.in_host ? "" : " disabled") + ' title="丢掉内存池副本（SSD 上的转换结果保留），下次冷启动重新读盘">从内存卸载</button>' +
+        '<button data-act="delete"' + (m.deployed ? "" : " disabled") + ">删除</button>" +
+        "</div></div>";
+    });
+    box.innerHTML = html;
+  }
+
+  function renderStatus() {
+    var st = state.status || {};
+    var pool = st.mem_pool_size ? gb(st.mem_pool_size) : "?";
+    var used = st.host_bytes ? gb(st.host_bytes) : "0.00";
+    var resident = state.models.filter(function (m) { return m.in_host; }).length;
+    $("storebar").innerHTML =
+      "内存池 <b>" + used + " / " + pool + " GB</b> · SSD 模型 <b>" + state.models.length + "</b> · 内存驻留 <b>" + resident + "</b> · 8 卡中的 4/5/6/7";
+    $("endpoint").textContent = "API " + (API || location.origin) + " · store 8073";
+  }
+
+  function renderMetrics() {
+    var name = state.selected;
+    var m = name ? state.metrics[name] : null;
+    $("metricmodel").textContent = name || "";
+    if (!m) {
+      $("metrics").innerHTML = '<div class="hint">选择模型并发一条消息，或点“加载”强制冷启动，这里会显示三级加载耗时。</div>';
+      return;
+    }
+    var t1 = m.disk_to_host_s, t2 = m.disk_to_vram_s, t3 = m.ttft_s;
+    var fromDisk = m.from_disk === true;
+    var midArrow = (t2 !== null && t2 !== undefined && t1 !== null && t1 !== undefined)
+      ? fmt(Math.max(0, t2 - t1)) : "—";
+    $("metrics").innerHTML =
+      '<div class="pipe">' +
+        '<div class="node' + (fromDisk ? " on" : "") + '"><div class="box">SSD</div><div class="cap">磁盘</div></div>' +
+        '<div class="arrow ' + (fromDisk ? "live" : "") + '"><span class="t">' + (fromDisk ? fmt(t1) + "s" : "命中") + "</span></div>" +
+        '<div class="node on"><div class="box">DRAM</div><div class="cap">内存池</div></div>' +
+        '<div class="arrow live"><span class="t">' + midArrow + "s</span></div>" +
+        '<div class="node on"><div class="box">VRAM</div><div class="cap">显存</div></div>' +
+      "</div>" +
+      '<div class="stat"><div class="k"><b>① SSD → 内存</b>磁盘读入 pinned 内存池</div><div class="v' + (fromDisk ? "" : " na") + '">' +
+        (fromDisk ? fmt(t1) + "<small>s</small>" : "命中内存") + "</div></div>" +
+      '<div class="stat"><div class="k"><b>② SSD → 显存</b>端到端冷加载</div><div class="v">' + fmt(t2) + "<small>s</small></div></div>" +
+      '<div class="stat"><div class="k"><b>③ 首字延迟 TTFT</b>API 收到 → 第一个 token</div><div class="v">' + fmt(t3) + "<small>s</small></div></div>" +
+      '<div class="stat"><div class="k"><b>内存 → 显存</b>权重拷贝 + 组装</div><div class="v">' + fmt(m.mem_to_vram_s) + "<small>s</small></div></div>" +
+      '<div class="hint" style="margin-top:10px">' +
+        (fromDisk ? "本次为真实冷启动：SSD 上读了一次。" : "本次内存池命中：没有读盘。") +
+        " TTFT 还包含 worker 实例拉起（Ray actor + 依赖导入），所以远大于 ②。" +
+      "</div>" +
+      '<div class="hint" style="margin-top:6px">缓存占用（按当前驻留模型估算）</div>' +
+      '<div class="bar"><span style="width:' + poolPercent() + '%"></span></div>' +
+      '<div class="mmeta">' + (state.status && state.status.host_bytes ? gb(state.status.host_bytes) : "0.00") + " / " +
+        (state.status && state.status.mem_pool_size ? gb(state.status.mem_pool_size) : "?") + " GB</div>";
+  }
+
+  function poolPercent() {
+    var st = state.status || {};
+    if (!st.mem_pool_size || !st.host_bytes) return 0;
+    return Math.min(100, (st.host_bytes / st.mem_pool_size) * 100).toFixed(1);
+  }
+
+  function renderChat() {
+    var name = state.selected;
+    renderedChatFor = name;
+    $("chatmodel").textContent = name || "未选择模型";
+    var log = $("log");
+    var list = (name && chats[name]) || [];
+    if (!list.length) {
+      log.innerHTML = '<div class="hint">' + (name
+        ? "已选择 " + escapeHtml(name) + "，发消息即会触发一次冷启动。"
+        : "先在左侧选择一个模型。") + "</div>";
+      return;
+    }
+    log.innerHTML = "";
+    list.forEach(function (msg) {
+      log.appendChild(bubble(msg.role, msg.content, msg.meta));
+    });
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function bubble(role, content, meta, cls) {
+    var el = document.createElement("div");
+    el.className = "msg " + (cls || (role === "user" ? "user" : "bot"));
+    var who = document.createElement("span");
+    who.className = "who";
+    who.textContent = role === "user" ? "你" : "助手";
+    el.appendChild(who);
+    var body = document.createElement("span");
+    body.innerHTML = formatContent(content);
+    el.appendChild(body);
+    if (meta) {
+      var m = document.createElement("span");
+      m.className = "meta";
+      m.textContent = meta;
+      el.appendChild(m);
+    }
+    return el;
+  }
+
+  // Qwen3 emits its reasoning inside  thinking...<｜end▁of▁thinking｜>; keep it readable
+  // but visually secondary.
+  function formatContent(text) {
+    return escapeHtml(text).replace(
+      /&lt;think&gt;([\s\S]*?)(&lt;\/think&gt;|$)/g,
+      '<span class="think">$1</span>'
+    );
+  }
+
+  function renderAll() {
+    renderModels();
+    renderStatus();
+    renderMetrics();
+    renderChat();
+  }
+
+  // Re-render everything except the transcript, so background refreshes never
+  // interrupt an in-flight typewriter animation.
+  function renderAside() {
+    renderModels();
+    renderStatus();
+    renderMetrics();
+    if (renderedChatFor !== state.selected) renderChat();
+  }
+
+  // ---------- data ----------
+
+  function refresh() {
+    return api("/ui/state").then(function (data) {
+      state.status = data;
+      state.models = data.models || [];
+      state.metrics = data.last_metrics || {};
+      if (!state.selected || !modelByName(state.selected)) {
+        state.selected = state.models.length ? state.models[0].name : null;
+      }
+      setConn(true, "已连接 · " + (API || location.origin));
+      renderAside();
+      return data;
+    }).catch(function (e) {
+      setConn(false, "连接失败");
+      toast("读取集群状态失败：" + e.message);
+    });
+  }
+
+  function select(name) {
+    state.selected = name;
+    renderAll();
+  }
+
+  function runChip(text) {
+    var chip = document.createElement("div");
+    chip.className = "hint";
+    chip.innerHTML = '<span class="dotpulse"></span>' + escapeHtml(text) + ' <span class="el">0.0s</span>';
+    $("log").appendChild(chip);
+    $("log").scrollTop = $("log").scrollHeight;
+    var t0 = Date.now();
+    var timer = setInterval(function () {
+      var el = chip.querySelector(".el");
+      if (el) el.textContent = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+    }, 100);
+    return function () { clearInterval(timer); chip.remove(); };
+  }
+
+  function send(text) {
+    var name = state.selected;
+    if (!name) { toast("先选择一个模型"); return; }
+    if (state.busy) { toast("上一个请求还在跑"); return; }
+    setBusy(true);
+
+    chats[name] = chats[name] || [];
+    var history = chats[name];
+    history.push({ role: "user", content: text });
+    renderChat();
+
+    var stop = runChip("冷启动中：SSD → 内存 → 显存 → 首字…");
+    var messages = history.map(function (m) {
+      return { role: m.role, content: m.content };
+    });
+
+    post("/v1/chat/completions", {
+      model: name,
+      messages: messages,
+      max_tokens: parseInt($("maxtokens").value, 10),
+      temperature: 0.7
+    }).then(function (res) {
+      if (stop) stop();
+      if (!res || res.error) {
+        var msg = (res && res.error) || "未知错误";
+        history.push({ role: "assistant", content: "[" + msg + "]" });
+        renderChat();
+        toast("推理失败：" + msg);
+        return;
+      }
+      var choice = (res.choices && res.choices[0]) || {};
+      var content = (choice.message && choice.message.content) || "";
+      var metrics = res.sllm_metrics || null;
+      if (metrics) state.metrics[name] = metrics;
+
+      var meta = metrics
+        ? ("冷启动 " + fmt(metrics.disk_to_vram_s) + "s · 首字 " + fmt(metrics.ttft_s) + "s" +
+           (metrics.from_disk ? " · 走了 SSD" : " · 内存池命中"))
+        : null;
+      var item = { role: "assistant", content: content, meta: meta };
+      history.push(item);
+      renderChat();
+      typewriter(item, content);
+      renderMetrics();
+      renderModels();
+      refresh();
+    }).catch(function (e) {
+      if (stop) stop();
+      history.push({ role: "assistant", content: "[请求失败] " + e.message });
+      renderChat();
+      toast("请求失败：" + e.message);
+    }).then(function () {
+      setBusy(false);
+    });
+  }
+
+  function typewriter(item, full) {
+    var log = $("log");
+    var nodes = log.querySelectorAll(".msg");
+    var node = nodes[nodes.length - 1];
+    if (!node) return;
+    node.textContent = "";
+    var who = document.createElement("span");
+    who.className = "who";
+    who.textContent = "助手";
+    node.appendChild(who);
+    var step = Math.max(1, Math.round(full.length / 400));
+    var i = 0;
+    var timer = setInterval(function () {
+      i += step;
+      node.textContent = "";
+      node.appendChild(who);
+      node.appendChild(document.createTextNode(full.slice(0, i)));
+      log.scrollTop = log.scrollHeight;
+      if (i >= full.length) {
+        clearInterval(timer);
+        renderChat();
+      }
+    }, 24);
+  }
+
+  function warmup(name) {
+    if (state.busy) { toast("上一个请求还在跑"); return; }
+    setBusy(true);
+    var stop = runChip("强制冷启动中…");
+    post("/v1/chat/completions", {
+      model: name,
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 1,
+      temperature: 0.7
+    }).then(function (res) {
+      if (stop) stop();
+      if (!res || res.error) { toast("加载失败：" + ((res && res.error) || "未知错误")); return; }
+      if (res.sllm_metrics) {
+        state.metrics[name] = res.sllm_metrics;
+        toast(name + " 冷启动完成：" +
+          (res.sllm_metrics.from_disk ? "SSD → 内存 " + fmt(res.sllm_metrics.disk_to_host_s) + "s， " : "内存池命中，") +
+          "SSD → 显存 " + fmt(res.sllm_metrics.disk_to_vram_s) + "s");
+      }
+      renderMetrics();
+      refresh();
+    }).catch(function (e) {
+      if (stop) stop();
+      toast("加载失败：" + e.message);
+    }).then(function () { setBusy(false); });
+  }
+
+  function unload(name) {
+    if (state.busy) { toast("上一个请求还在跑"); return; }
+    post("/unload", { model: name }).then(function () {
+      toast("已卸载 " + name + " 的内存池副本，下次冷启动会重新读 SSD");
+      delete state.metrics[name];
+      refresh();
+    }).catch(function (e) { toast("卸载失败：" + e.message); });
+  }
+
+  function remove(name) {
+    if (state.busy) { toast("上一个请求还在跑"); return; }
+    if (!window.confirm("删除模型 " + name + " ？（SSD 上的转换结果不会被删除）")) return;
+    post("/delete", { model: name }).then(function () {
+      toast("已删除 " + name);
+      delete state.metrics[name];
+      delete chats[name];
+      if (state.selected === name) state.selected = null;
+      refresh();
+    }).catch(function (e) { toast("删除失败：" + e.message); });
+  }
+
+  function deploy() {
+    var name = $("deploy-name").value.trim();
+    if (!name) { toast("请输入模型名，例如 Qwen/Qwen2.5-0.5B-Instruct"); return; }
+    var btn = $("deploy");
+    btn.disabled = true;
+    toast("部署中：" + name + "（首次需要下载 + 转换，可能要几分钟）");
+    post("/ui/deploy", { model: name, backend: $("deploy-backend").value })
+      .then(function () {
+        toast("[OK] " + name + " 已部署");
+        $("deploy-name").value = "";
+        return refresh();
+      })
+      .catch(function (e) { toast("部署失败：" + e.message); })
+      .then(function () { btn.disabled = false; });
+  }
+
+  // ---------- events ----------
+
+  $("models").addEventListener("click", function (e) {
+    var btn = e.target.closest ? e.target.closest("button[data-act]") : null;
+    var card = e.target.closest ? e.target.closest(".mcard") : null;
+    if (btn && card) {
+      var name = card.getAttribute("data-model");
+      var act = btn.getAttribute("data-act");
+      select(name);
+      if (act === "load") warmup(name);
+      else if (act === "unload") unload(name);
+      else if (act === "delete") remove(name);
+      return;
+    }
+    if (card) select(card.getAttribute("data-model"));
+  });
+
+  $("send").addEventListener("click", function () {
+    var v = $("input").value.trim();
+    if (!v) return;
+    $("input").value = "";
+    send(v);
+  });
+
+  $("input").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      var v = $("input").value.trim();
+      if (!v) return;
+      $("input").value = "";
+      send(v);
+    }
+  });
+
+  $("deploy").addEventListener("click", deploy);
+  $("refresh").addEventListener("click", refresh);
+  $("maxtokens").addEventListener("change", function () {});
+
+  refresh();
+  setInterval(function () { if (!state.busy) refresh(); }, 8000);
+})();
+</script>
+</body>
+</html>

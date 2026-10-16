@@ -103,6 +103,10 @@ class SllmLocalStore:
                     delta_time = 0
             return [self.disk_models, self.pinned_memory_pool, delta_time]
 
+    async def get_server_config(self):
+        """Pool geometry reported by the local store daemon."""
+        return self.client.get_server_config()
+
     async def load_to_host(self, model_name: str) -> bool:
         async with self.lock:
             if model_name not in self.disk_models:
@@ -138,6 +142,33 @@ class SllmLocalStore:
                 f"{model_name} is being loaded to node {self.node_id},"
                 " estimated completion time: "
                 f"{self._format_time(estimated_completion_time)}"
+            )
+            return True
+
+    async def unload_from_host(self, model_name: str) -> bool:
+        """Release the host (pinned-memory) copy of a model.
+
+        The on-disk checkpoint is untouched -- only the DRAM cache copy is
+        dropped, so the next cold start re-reads it from storage.
+        """
+        async with self.lock:
+            if model_name not in self.disk_models:
+                logger.error(f"{model_name} not found on node {self.node_id}")
+                return False
+            model_path_list, model_size = self.disk_models[model_name]
+            for model_path in model_path_list:
+                self.client.unload_from_cpu(model_path)
+            # python-side bookkeeping is only filled by load_to_host(); a
+            # backend cold start loads directly via the store client, so be
+            # tolerant when the entry is absent.
+            if model_name in self.pinned_memory_pool:
+                self.pinned_memory_pool.pop(model_name, None)
+                chunks = (model_size + self.chunk_size - 1) // self.chunk_size
+                self.pinned_memory_pool_usage = max(
+                    0, self.pinned_memory_pool_usage - chunks
+                )
+            logger.info(
+                f"{model_name} unloaded from host memory on node {self.node_id}"
             )
             return True
 
@@ -351,6 +382,42 @@ class StoreManager:
             local_server = self.local_servers[node_id]
         logger.info(f"Loading {model_name} to node {node_id}")
         return await local_server.load_to_host(model_name)
+
+    async def get_server_config(self, node_id: Optional[str] = None):
+        """Pool geometry of a store daemon (defaults to the first node)."""
+        async with self.metadata_lock:
+            node_ids = (
+                [node_id] if node_id is not None else list(self.local_servers)
+            )
+            servers = [
+                (nid, self.local_servers[nid])
+                for nid in node_ids
+                if nid in self.local_servers
+            ]
+        for nid, local_server in servers:
+            try:
+                config = await local_server.get_server_config()
+            except Exception as e:
+                logger.error(f"Failed to get store config on {nid}: {e}")
+                continue
+            if config:
+                return config
+        return {}
+
+    async def unload_from_host(self, model_name: str):
+        """Unload a model from the host memory pool on every node holding it."""
+        results = {}
+        for node_id, local_server in self.local_servers.items():
+            try:
+                results[node_id] = await local_server.unload_from_host(
+                    model_name
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to unload {model_name} on node {node_id}: {e}"
+                )
+                results[node_id] = False
+        return results
 
     async def register(self, model_config):
         model_name = model_config.get("model")

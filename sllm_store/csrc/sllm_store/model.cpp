@@ -23,7 +23,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <future>
 #include <mutex>
@@ -242,11 +244,13 @@ int Model::ToHost(int num_threads) {
     // release pinned memory
     pinned_mem_.reset();
     state_ = MemoryState::UNALLOCATED;
+    cv_.notify_all();
 
     return -1;
   }
 
   state_ = MemoryState::LOADED;
+  cv_.notify_all();
   LOG(INFO) << "Finished loading model " << model_path_ << " from disk";
 
   return 0;
@@ -384,17 +388,28 @@ int Model::ToGpu(
   return 0;
 }
 
-int Model::WaitInHost() {
+int Model::WaitInHost(int64_t timeout_ms) {
   std::unique_lock<std::mutex> lock(mutex_);
   if (state_ < MemoryState::LOADED) {
-    cv_.wait(lock, [this] {
+    // UNALLOCATED means the disk -> host copy failed, so it is terminal too.
+    auto ready = [this] {
       return state_ == MemoryState::LOADED ||
+             state_ == MemoryState::UNALLOCATED ||
              state_ == MemoryState::INTERRUPTED;
-    });
+    };
+    if (timeout_ms <= 0) {
+      cv_.wait(lock, ready);
+    } else if (!cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                             ready)) {
+      LOG(ERROR) << "Timed out waiting for model " << model_path_
+                 << " to be loaded to host";
+      return -1;
+    }
   }
 
-  if (state_ >= MemoryState::INTERRUPTED) {
-    LOG(INFO) << "Model " << model_path_ << " is interrupted";
+  if (state_ != MemoryState::LOADED) {
+    LOG(ERROR) << "Model " << model_path_ << " is not in host memory, state "
+               << state_;
     return 1;
   }
 

@@ -38,7 +38,11 @@ from transformers import (
 )
 from transformers.generation.streamers import BaseStreamer
 
-from sllm.backends.backend_utils import BackendStatus, SllmBackend
+from sllm.backends.backend_utils import (
+    DISK_TO_HOST_S_THRESHOLD,
+    BackendStatus,
+    SllmBackend,
+)
 from sllm.logger import init_logger
 from sllm_store.transformers import load_lora, load_model, save_lora
 
@@ -54,8 +58,11 @@ class InferenceStatus(BaseStreamer):
         super().__init__()
         self.status = status
         self.intermediate = []
+        self.first_token_time: Optional[float] = None
 
     def put(self, value):
+        if self.first_token_time is None:
+            self.first_token_time = time.time()
         value = value.tolist()
         if not self.intermediate:
             self.intermediate = value
@@ -78,6 +85,10 @@ class InferenceStatus(BaseStreamer):
         logger.info("Deleting intermediate output")
         self.intermediate = []
 
+    def reset(self):
+        self.intermediate = []
+        self.first_token_time = None
+
 
 class TransformersBackend(SllmBackend):
     def __init__(
@@ -97,6 +108,9 @@ class TransformersBackend(SllmBackend):
         self.model = None
         self.tokenizer = None
         self.past_key_values = None
+        # cold-start timings, in seconds
+        self.load_time_s: Optional[float] = None
+        self.disk_to_host_s: Optional[float] = None
 
     def convert_str_to_json(self, json_str):
         try:
@@ -135,6 +149,8 @@ class TransformersBackend(SllmBackend):
                 "STORAGE_PATH", os.path.expanduser("~/models")
             )
             model_path = os.path.join("transformers", self.model_name)
+            _load_timings: Dict[str, Any] = {}
+            _load_t0 = time.time()
             self.model = load_model(
                 model_path,
                 device_map=device_map,
@@ -142,7 +158,10 @@ class TransformersBackend(SllmBackend):
                 storage_path=storage_path,
                 hf_model_class=hf_model_class,
                 quantization_config=quantization_config,
+                timings=_load_timings,
             )
+            self.load_time_s = time.time() - _load_t0
+            self.disk_to_host_s = _load_timings.get("disk_to_host_s")
             tokenizer_path = os.path.join(
                 storage_path, "transformers", self.model_name, "tokenizer"
             )
@@ -237,6 +256,10 @@ class TransformersBackend(SllmBackend):
 
         assert self.model is not None
 
+        # t0 for TTFT, stamped by the API layer when the request arrived.
+        request_start = request_data.get("sllm_t0", None)
+        self.inf_status.reset()
+
         model_name = request_data.get("model", "dummy-model")
         messages = request_data.get("messages", [])
         temperature = request_data.get("temperature", 0.7)
@@ -328,9 +351,37 @@ class TransformersBackend(SllmBackend):
                 },
             }
 
+            response["sllm_metrics"] = self._collect_metrics(request_start)
+
             self.inf_status.delete()
 
             return response
+
+    def _collect_metrics(self, request_start) -> Dict[str, Any]:
+        """Cold-start / latency metrics for the frontend (seconds)."""
+        first_token_time = self.inf_status.first_token_time
+        mem_to_vram_s = None
+        if self.load_time_s is not None and self.disk_to_host_s is not None:
+            mem_to_vram_s = self.load_time_s - self.disk_to_host_s
+        return {
+            # (1) SSD/disk -> pinned host memory pool
+            "disk_to_host_s": self.disk_to_host_s,
+            # (2) SSD/disk -> GPU VRAM (whole cold load, includes (1))
+            "disk_to_vram_s": self.load_time_s,
+            # (2) - (1): host memory pool -> VRAM
+            "mem_to_vram_s": mem_to_vram_s,
+            # (3) TTFT: request received (API) -> first generated token
+            "ttft_s": (
+                None
+                if (first_token_time is None or request_start is None)
+                else first_token_time - request_start
+            ),
+            # heuristic: a real disk read is far slower than a cached no-op
+            "from_disk": bool(
+                self.disk_to_host_s is not None
+                and self.disk_to_host_s > DISK_TO_HOST_S_THRESHOLD
+            ),
+        }
 
     def load_lora_adapter(self, lora_name: str, lora_path: str):
         with self.status_lock:

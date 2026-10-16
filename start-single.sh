@@ -10,6 +10,9 @@ VENV_WORKER="$REPO/.venv-worker"
 GPUS="${GPUS:-4,5,6,7}"                       # 逗号分隔的物理卡号
 NUM_GPUS="$(echo "$GPUS" | awk -F, '{print NF}')"
 MODEL_FOLDER="${MODEL_FOLDER:-$HOME/models}"
+# 本地已有模型目录: 部署时优先在这里找 <org>/<model>, 找到就不去 HF 下载
+LOCAL_MODEL_ROOT="${LOCAL_MODEL_ROOT:-/ssd/nfs/models}"
+export LOCAL_MODEL_ROOT
 RAY_PORT="${RAY_PORT:-6379}"
 HEAD_IP="${HEAD_IP:-$(hostname -I | awk '{print $1}')}"
 API_HOST="${API_HOST:-0.0.0.0}"

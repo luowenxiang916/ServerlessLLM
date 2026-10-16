@@ -39,11 +39,33 @@ from vllm.inputs import TokensPrompt
 from vllm.utils.counter import Counter
 
 from sllm.backends.backend_utils import (
+    DISK_TO_HOST_S_THRESHOLD,
     BackendStatus,
     SllmBackend,
 )
 
+try:  # `sllm_store` is only importable on a node that ships the store
+    from sllm_store.utils import read_load_timings
+except ImportError:  # pragma: no cover - keeps the module importable alone
+    read_load_timings = None  # type: ignore[assignment]
+
 logger = logging.getLogger("ray")
+
+
+def _model_path_in_store(model_path: str) -> Optional[str]:
+    """Return *model_path* the way the store names it.
+
+    ``ServerlessLLMLoader`` strips the local storage prefix before asking the
+    store for the weights, so this is the key the load timings are filed under
+    (see ``sllm_store.utils.record_load_timings``).
+    """
+    storage_path = os.path.normpath(
+        os.getenv("STORAGE_PATH", os.path.expanduser("~/models"))
+    )
+    normalized = os.path.normpath(model_path)
+    if not normalized.startswith(storage_path + os.sep):
+        return None
+    return normalized[len(storage_path) + 1 :]
 
 
 def process_output(output: RequestOutput, model_name: str) -> Dict[str, Any]:
@@ -158,7 +180,11 @@ class VllmBackend(SllmBackend):
         self.enable_prefix_caching = backend_config.get(
             "enable_prefix_caching", True
         )
-        self.task = backend_config.get("task", "auto")
+        # NOTE: vLLM renamed the engine-level `task` arg to `runner`. Accept
+        # either spelling so this works across vLLM versions.
+        self.task = backend_config.get(
+            "task", backend_config.get("runner", "auto")
+        )
 
         async_engine_fields = {f.name for f in fields(AsyncEngineArgs)}
         filtered_engine_config = {
@@ -172,23 +198,29 @@ class VllmBackend(SllmBackend):
 
         if load_format is not None:
             filtered_engine_config["load_format"] = load_format
-            filtered_engine_config["model"] = backend_config.get(
-                "pretrained_model_name_or_path"
-            )
+            model_path = backend_config.get("pretrained_model_name_or_path")
         else:
             storage_path = os.getenv(
                 "STORAGE_PATH", os.path.expanduser("~/models")
             )
             model_path = os.path.join(storage_path, "vllm", model)
-            filtered_engine_config["model"] = model_path
             filtered_engine_config["load_format"] = "serverless_llm"
+        filtered_engine_config["model"] = model_path
+        # Name the store uses for these weights; `None` when the path is not
+        # below the storage root, in which case no timings can be reported.
+        self.store_model_path = _model_path_in_store(model_path)
+        # Cold-start timings, filled in by `init_backend`, in seconds.
+        self.load_timings: Dict[str, Any] = {}
 
         # NOTE: Automatic enable prefix cachinging
         filtered_engine_config["enforce_eager"] = self.enforce_eager
         filtered_engine_config["enable_prefix_caching"] = (
             self.enable_prefix_caching
         )
-        filtered_engine_config["task"] = self.task
+        if "task" in async_engine_fields:
+            filtered_engine_config["task"] = self.task
+        elif "runner" in async_engine_fields:
+            filtered_engine_config["runner"] = self.task
 
         logger.info(
             f"Creating new VLLM engine with config: {filtered_engine_config}"
@@ -202,8 +234,23 @@ class VllmBackend(SllmBackend):
         async with self.status_lock:
             if self.status != BackendStatus.UNINITIALIZED:
                 return
+            _engine_t0 = time.time()
             self.engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+            # vLLM loads the weights inside its own EngineCore process and
+            # `from_engine_args` only returns once that process is ready, so
+            # the stage timings it recorded are complete by now.
+            self._read_load_timings(newer_than=_engine_t0)
             self.status = BackendStatus.RUNNING
+
+    def _read_load_timings(self, newer_than: float) -> None:
+        if read_load_timings is None or not self.store_model_path:
+            return
+        self.load_timings = read_load_timings(
+            self.store_model_path, newer_than=newer_than
+        )
+        logger.info(
+            f"Load timings for {self.store_model_path}: {self.load_timings}"
+        )
 
     async def generate(self, request_data: Dict[str, Any]):
         async with self.status_lock:
@@ -214,6 +261,10 @@ class VllmBackend(SllmBackend):
 
         if request_data is None:
             return {"error": "Request data is missing"}
+
+        # t0 for TTFT, stamped by the API layer when the request arrived. It is
+        # not a SamplingParams field, so drop it before building them.
+        request_start = request_data.pop("sllm_t0", None)
 
         model_name: str = request_data.pop("model", "vllm-model")
         messages: Dict[Dict[str, str], str] = request_data.pop("messages", [])
@@ -251,7 +302,10 @@ class VllmBackend(SllmBackend):
 
         # Non-stream case
         final_output = None
+        first_token_time = None
         async for response_output in results_generator:
+            if first_token_time is None:
+                first_token_time = time.time()
             final_output = response_output
             await self.request_trace.update_status(request_id, response_output)
 
@@ -260,7 +314,43 @@ class VllmBackend(SllmBackend):
         if not self.trace_debug:
             await self.request_trace.delete_request(request_id)
 
-        return process_output(final_output, model_name)
+        response = process_output(final_output, model_name)
+        # Same shape the transformers backend reports, so the console can treat
+        # both backends alike.
+        response["sllm_metrics"] = self._collect_metrics(
+            request_start, first_token_time
+        )
+        return response
+
+    def _collect_metrics(
+        self,
+        request_start: Optional[float],
+        first_token_time: Optional[float],
+    ) -> Dict[str, Any]:
+        """Cold-start / latency metrics for the frontend (seconds).
+
+        `disk_to_host_s` / `mem_to_vram_s` / `disk_to_vram_s` are measured by
+        the store while the weights are paged in, i.e. inside vLLM's
+        EngineCore process, and handed over to this actor by `init_backend`.
+        They are therefore constant for the lifetime of the instance, which is
+        exactly what the console wants: it shows how long the model that is
+        currently serving took to arrive.
+        """
+        disk_to_host_s = self.load_timings.get("disk_to_host_s")
+        return {
+            "disk_to_host_s": disk_to_host_s,
+            "disk_to_vram_s": self.load_timings.get("disk_to_vram_s"),
+            "mem_to_vram_s": self.load_timings.get("mem_to_vram_s"),
+            "ttft_s": (
+                None
+                if (first_token_time is None or request_start is None)
+                else first_token_time - request_start
+            ),
+            "from_disk": bool(
+                disk_to_host_s is not None
+                and disk_to_host_s > DISK_TO_HOST_S_THRESHOLD
+            ),
+        }
 
     async def shutdown(self):
         """Abort all requests and shutdown the backend."""

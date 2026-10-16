@@ -25,6 +25,15 @@ TensorWriter::~TensorWriter() {}
 
 uint64_t TensorWriter::writeRecord(const char* data, size_t size) {
   if (partition_idx_ == -1 || partition_size_ + size > kPartitionMaxSize) {
+    if (buffer_) {
+      // AlignedBuffer pads the tail of the partition up to kAlignment when it
+      // flushes (O_DIRECT requirement). The reader (Model::LoadModel) walks
+      // the partition files as one concatenated stream using their *on-disk*
+      // sizes, so the global offset has to absorb that padding here. Without
+      // this, every offset from partition 1 onwards is short by up to
+      // kAlignment-1 bytes and the tensors are read from the wrong place.
+      offset_ += buffer_->finalize();
+    }
     // create a new partition
     partition_idx_++;
     partition_size_ = 0;

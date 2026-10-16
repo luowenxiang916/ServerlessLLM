@@ -250,6 +250,28 @@ class SllmController:
             await request_router.update.remote(auto_scaling_config)
         # TODO: update other config (if possible)
 
+    async def unload(self, model_name: str):
+        """Release the host (DRAM) copy of a model.
+
+        The on-disk checkpoint is kept; only the pinned-memory cache is
+        dropped, so the next request pays the SSD -> memory cost again.
+        """
+        async with self.metadata_lock:
+            if model_name not in self.registered_models:
+                raise SllmControllerException(
+                    f"Model {model_name} not found", method="unload"
+                )
+        logger.info(f"Unloading model {model_name} from host memory")
+        return await self.store_manager.unload_from_host.remote(model_name)
+
+    async def store_status(self):
+        """Host memory-pool / on-disk state per node, for the frontend."""
+        return await self.store_manager.get_store_info.remote()
+
+    async def store_config(self):
+        """Pinned memory pool size / chunk size, for the frontend."""
+        return await self.store_manager.get_server_config.remote()
+
     async def exists(self, model_name: str):
         async with self.metadata_lock:
             return model_name in self.registered_models

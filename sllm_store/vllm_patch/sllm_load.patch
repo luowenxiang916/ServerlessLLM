@@ -27,11 +27,9 @@ index 301f2d00b..e3aa40da1 100644
  
  
 diff --git a/vllm/model_executor/model_loader/sllm_loader.py b/vllm/model_executor/model_loader/sllm_loader.py
-new file mode 100644
-index 000000000..c65b46989
 --- /dev/null
 +++ b/vllm/model_executor/model_loader/sllm_loader.py
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,198 @@
 +import torch
 +from torch import nn
 +import collections
@@ -40,9 +38,44 @@ index 000000000..c65b46989
 +from typing import Dict, Optional
 +from vllm.config import LoadConfig, VllmConfig, ModelConfig
 +from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-+from vllm.model_executor.model_loader.utils import (
-+    initialize_model)
++from vllm.model_executor.model_loader.utils import initialize_model
 +from vllm.utils.torch_utils import set_default_torch_dtype
++
++
++def _rebuild_moe_kernels(model: nn.Module) -> None:
++    """Recreate the MoE kernels of unquantized MoE layers after a store load.
++
++    ServerlessLLM's ``save_model`` runs on the model vLLM has already loaded
++    *and* post-processed, so the checkpoint it writes already holds the
++    kernel-layout tensors. ``process_weights_after_loading`` therefore must
++    not be re-run -- it would repack every weight a second time (for the
++    FlashInfer CUTLASS unquantized backend that means the MoE ``w13``
++    projection gets swapped twice, corrupting every expert). The kernel
++    object itself is not a tensor and is not part of the checkpoint, so it
++    still has to be created here, minus the weight conversion step.
++    """
++    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
++        make_unquantized_moe_kernel,
++    )
++    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
++        UnquantizedFusedMoEMethod,
++    )
++
++    for _, module in model.named_modules():
++        quant_method = getattr(module, "quant_method", None)
++        if not isinstance(quant_method, UnquantizedFusedMoEMethod):
++            continue
++        if quant_method.moe_kernel is not None or quant_method.experts_cls is None:
++            continue
++        module._ensure_moe_quant_config_init()
++        routing_tables = getattr(module, "_expert_routing_tables", lambda: None)()
++        quant_method.moe_kernel = make_unquantized_moe_kernel(
++            quant_config=quant_method.moe_quant_config,
++            moe_config=quant_method.moe,
++            backend=quant_method.unquantized_backend,
++            experts_cls=quant_method.experts_cls,
++            routing_tables=routing_tables,
++        )
 +
 +class ServerlessLLMLoader(BaseModelLoader):
 +    # DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
@@ -145,6 +178,13 @@ index 000000000..c65b46989
 +                    tensor = sllm_state_dict[key]
 +                    param.data = tensor
 +                    state_dict.pop(key)
++            # Some checkpoint entries (e.g. the attention layers' fake-quant
++            # `_k_scale`/`_v_scale`/`_q_scale`/`_prob_scale`) are registered as
++            # buffers rather than parameters; restore those as well.
++            for name, buffer in model.named_buffers(recurse=True):
++                if name in key_list:
++                    buffer.data = sllm_state_dict[name]
++                    state_dict.pop(name)
 +            if state_dict:
 +                raise ValueError(
 +                    f"Missing keys {tuple(state_dict)} in loaded state!")
@@ -152,7 +192,13 @@ index 000000000..c65b46989
 +            for name, buffer in model.named_buffers(recurse=True):
 +                if buffer.device.type != 'cuda':
 +                    buffer.data = buffer.data.to(f'cuda:{device_id}')
-+            
++
++            # ServerlessLLM restores checkpoint tensors straight from the
++            # store, which bypasses vLLM's regular loader pipeline. The
++            # tensors are already post-processed (see `_rebuild_moe_kernels`),
++            # so only the derived, non-serializable state is rebuilt here.
++            _rebuild_moe_kernels(model)
++
 +        return model
 +    
 +    def download_model(self, model_config: ModelConfig) -> None:
@@ -279,12 +325,20 @@ index db8303fce..be0c4e034 100644
      def check_health(self) -> None:
          """Checks if the executor is healthy. If not, it should raise an
 diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
-index 156294693..153613c93 100644
 --- a/vllm/v1/worker/gpu_model_runner.py
 +++ b/vllm/v1/worker/gpu_model_runner.py
-@@ -3438,6 +3438,20 @@ class GPUModelRunner(
-             model_config=self.model_config,
+@@ -5550,24 +5550,38 @@
          )
+         if self.model_config.quantization is None and loaded_weights is not None:
+             weights_not_loaded = weights_to_load - loaded_weights
+             if weights_not_loaded:
+                 logger.warning(
+                     "Following weights were not loaded from checkpoint: %s",
+                     weights_not_loaded,
+                 )
+ 
+         self.reset_encoder_cache()
+         self.reset_mm_cache()
  
 +    def save_serverless_llm_state(
 +        self,
@@ -303,15 +357,75 @@ index 156294693..153613c93 100644
      def _get_prompt_logprobs_dict(
          self,
          hidden_states: torch.Tensor,
+         num_scheduled_tokens: dict[str, int],
+     ) -> dict[str, LogprobsTensors | None]:
+         num_prompt_logprobs_dict = self.num_prompt_logprobs
+         if not num_prompt_logprobs_dict:
+             return {}
+ 
+         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
+ 
+         # Since prompt logprobs are a rare feature, prioritize simple,
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -368,24 +368,39 @@
+             # for the max capture size so they can be sliced per batch.
+             # Save as persistent member so runtime can copy received data
+             # into the same addresses that the CUDA graphs captured.
+             self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                 batch_size=self.max_num_tokens,
+                 dtype=self.model_config.dtype,
+                 device=self.device,
+             )
+ 
+     def get_model(self) -> nn.Module:
+         return self.model
+ 
++    def save_serverless_llm_state(
++        self,
++        path: str,
++        pattern: str | None = None,
++        max_size: int | None = None,
++    ) -> None:
++        from vllm.model_executor.model_loader import ServerlessLLMLoader
++
++        ServerlessLLMLoader.save_model(
++            self.model,
++            path,
++            pattern=pattern,
++            max_size=max_size,
++        )
++
+     def get_draft_model(self) -> nn.Module | None:
+         speculator = self.speculator
+         if not isinstance(speculator, DraftModelSpeculator):
+             return None
+         return speculator.model
+ 
+     def reload_weights(self, *args, **kwargs) -> None:
+         # TODO(Wentao): Use full version instead of import when fully migrated to v2
+         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
+ 
+         GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
+ 
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
 index 52f84ddbf..0776e3f19 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -851,6 +851,18 @@ class Worker(WorkerBase):
+@@ -1256,24 +1256,36 @@
+         pattern: str | None = None,
+         max_size: int | None = None,
+     ) -> None:
+         from vllm.model_executor.model_loader import ShardedStateLoader
+ 
+         ShardedStateLoader.save_model(
+             self.model_runner.model,
+             path,
              pattern=pattern,
              max_size=max_size,
          )
-+        
+ 
 +    def save_serverless_llm_state(
 +        self,
 +        path: str,
@@ -323,9 +437,18 @@ index 52f84ddbf..0776e3f19 100644
 +            pattern=pattern,
 +            max_size=max_size,
 +        )
++
+     def save_tensorized_model(self, tensorizer_config: "TensorizerConfig") -> None:
+         TensorizerLoader.save_model(
+             self.get_model(),
+             tensorizer_config=tensorizer_config,
+             model_config=self.model_config,
+         )
  
-     def save_tensorized_model(
-         self,
+     def _check_weight_transfer_engine(self) -> None:
+         if self.weight_transfer_engine is None:
+             raise RuntimeError(
+                 "Weight transfer not configured. "
+                 "Please set weight_transfer_config to enable weight transfer."
 -- 
 2.43.0
-

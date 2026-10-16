@@ -20,6 +20,12 @@ from enum import Enum, auto
 from typing import Any, Dict, List, Optional
 
 
+# A real disk read is far slower than the no-op of a model that is already
+# resident in the pinned host pool, so anything above this counts as "the
+# weights came from disk". Shared by every backend that reports `sllm_metrics`.
+DISK_TO_HOST_S_THRESHOLD = 0.05
+
+
 class BackendStatus(Enum):
     UNINITIALIZED = auto()
     RUNNING = auto()

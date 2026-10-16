@@ -146,6 +146,7 @@ def load_model(
     storage_path: Optional[str] = None,
     fully_parallel: bool = False,
     hf_model_class: str = "AutoModelForCausalLM",
+    timings: Optional[Dict[str, Any]] = None,
 ):
     if fully_parallel:
         return fully_parallel_load(
@@ -165,6 +166,7 @@ def load_model(
         torch_dtype=torch_dtype,
         quantization_config=quantization_config,
         storage_path=storage_path,
+        timings=timings,
     )
 
 
@@ -270,11 +272,21 @@ def best_effort_load(
         Union[QuantizationConfigMixin, Dict[str, Any]]
     ] = None,
     storage_path: Optional[str] = None,
+    timings: Optional[Dict[str, Any]] = None,
 ):
     client = SllmStoreClient("127.0.0.1:8073")
+    # Measure the disk -> pinned-host-memory stage. When the model is already
+    # cached in the host pool this is a no-op and returns in a few ms.
+    _disk_t0 = time.time()
     ret = client.load_into_cpu(model_path)
     if not ret:
         raise ValueError(f"Failed to load model {model_path} into CPU")
+    # load_into_cpu only dispatches the copy; confirm_model_in_host blocks
+    # until the model has actually landed in the pinned host memory pool.
+    if not client.confirm_model_in_host(model_path):
+        logger.warning(f"Failed to confirm {model_path} in host memory")
+    if timings is not None:
+        timings["disk_to_host_s"] = time.time() - _disk_t0
 
     replica_uuid = _get_uuid()
     device_map = _transform_device_map_to_dict(device_map)

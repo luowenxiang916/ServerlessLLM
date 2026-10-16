@@ -126,13 +126,37 @@ class StorageServicer(storage_pb2_grpc.StorageServicer):
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             return storage_pb2.ConfirmModelResponse()
 
+        if device_type == storage_pb2.DEVICE_TYPE_CPU:
+            # load_model_from_disk_async only dispatches the disk -> host copy,
+            # so this is the point where a caller can learn that the model is
+            # really resident in the pinned memory pool.
+            loop = asyncio.get_event_loop()
+            ret = await loop.run_in_executor(
+                None, self.storage.wait_model_in_host, model_path, 300000
+            )
+            if ret == 0:
+                logger.info(
+                    f"Confirm model {model_path} in host memory success"
+                )
+                return storage_pb2.ConfirmModelResponse(model_path=model_path)
+
+            logger.error(f"Confirm model {model_path} in host memory failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return storage_pb2.ConfirmModelResponse()
+
         if device_type != storage_pb2.DEVICE_TYPE_GPU:
             logger.error(f"Unsupported device type: {device_type}")
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             return storage_pb2.ConfirmModelResponse()
 
+        # `wait_model_in_gpu` blocks until the host -> device copy is done.
+        # Run it off the event loop: a coroutine that blocks here would stall
+        # every other RPC served by this process for the whole copy.
+        loop = asyncio.get_event_loop()
         for i in range(5):
-            ret = self.storage.wait_model_in_gpu(model_path, replica_uuid)
+            ret = await loop.run_in_executor(
+                None, self.storage.wait_model_in_gpu, model_path, replica_uuid
+            )
             if ret == 0:
                 logger.info(
                     f"Confirm model {model_path} replica {replica_uuid} success"
@@ -162,8 +186,13 @@ class StorageServicer(storage_pb2_grpc.StorageServicer):
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             return storage_pb2.UnloadModelResponse()
 
+        # `unload_model_from_host` blocks until any in-flight copy finishes;
+        # keep it off the event loop so other RPCs stay responsive.
+        loop = asyncio.get_event_loop()
         for i in range(5):
-            ret = self.storage.unload_model_from_host(model_path)
+            ret = await loop.run_in_executor(
+                None, self.storage.unload_model_from_host, model_path
+            )
             if ret == 0:
                 logger.info(f"UnloadModel: success {model_path}")
                 return storage_pb2.UnloadModelResponse(model_path=model_path)
@@ -176,7 +205,8 @@ class StorageServicer(storage_pb2_grpc.StorageServicer):
         return storage_pb2.UnloadModelResponse()
 
     async def ClearMem(self, request, context):
-        ret = self.storage.clear_mem()
+        loop = asyncio.get_event_loop()
+        ret = await loop.run_in_executor(None, self.storage.clear_mem)
         if ret != 0:
             logger.error("ClearMem failed")
             context.set_code(grpc.StatusCode.INTERNAL)

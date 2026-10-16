@@ -15,9 +15,14 @@
 #  See the License for the specific language governing permissions and         #
 #  limitations under the License.                                              #
 # ---------------------------------------------------------------------------- #
+import json
+import os
 import re
+import tempfile
+import time
 from functools import reduce
 from contextlib import suppress
+from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -29,6 +34,9 @@ from transformers.utils.quantization_config import (
 )
 
 from sllm_store.client import SllmStoreClient
+from sllm_store.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def set_module_buffer_to_device(
@@ -69,6 +77,18 @@ def send_module_buffers_to_device(
                     set_module_buffer_to_device(module, buffer_name, device_id)
 
 
+# CUDA kernels (CUTLASS/FlashInfer, inductor-generated Triton) issue vectorized
+# loads that require 16/128/256-byte aligned base pointers. Upstream packs the
+# per-rank tensors back to back in one big device buffer, which leaves almost
+# every tensor after the first at a 2-byte-aligned offset and makes such kernels
+# fail with `CUDA error: misaligned address`. Pad every slot to this boundary.
+DEVICE_TENSOR_ALIGNMENT = 256
+
+
+def _align_up(value, alignment=DEVICE_TENSOR_ALIGNMENT):
+    return (value + alignment - 1) // alignment * alignment
+
+
 def calculate_device_memory(device_map, tensor_index):
     device_memory = {}
     tensor_record = {}
@@ -80,7 +100,9 @@ def calculate_device_memory(device_map, tensor_index):
             if (offset, size) in tensor_record:
                 continue  # Skip duplicate tensors
             tensor_record[(offset, size)] = True
-            device_memory[device] += tensor_index[tensor_name][1]
+            # Keep the running total in sync with
+            # `calculate_tensor_device_offsets`, which also aligns each slot.
+            device_memory[device] = _align_up(device_memory[device]) + size
         else:
             raise ValueError(f"Tensor {tensor_name} not found in tensor_index.")
 
@@ -104,6 +126,7 @@ def calculate_tensor_device_offsets(device_map, tensor_index):
                     (offset, size)
                 ]
             else:
+                device_offset[device] = _align_up(device_offset[device])
                 tensor_record[(offset, size)] = device_offset[device]
                 tensor_device_offsets[device][tensor_name] = device_offset[
                     device
@@ -346,3 +369,79 @@ def quantize(
 
     hf_quantizer.postprocess_model(model)
     return model
+
+
+# --------------------------------------------------------------------------- #
+# Load stage timings
+#
+# The vLLM backend loads the weights inside vLLM's EngineCore process, while
+# the metrics are reported by the backend actor, which lives in another
+# process. The EngineCore side therefore records the timings of the load it
+# just ran as a small JSON file and the actor picks them up once its engine is
+# up (see `sllm.backends.vllm_backend`).
+#
+# One file is written per shard (`<model>/rank_0` -> `<key>.json`); the reader
+# merges all shards of a model and keeps the slowest one, because the model is
+# only usable once every shard of the tensor-parallel group is resident.
+# A missing or unreadable file is not an error: the timings are then simply
+# reported as unknown.
+# --------------------------------------------------------------------------- #
+_LOAD_TIMINGS_DIR = os.path.join(tempfile.gettempdir(), "sllm_load_timings")
+
+
+def _load_timings_key(model_path: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "__", str(model_path).strip("/"))
+
+
+def record_load_timings(model_path: str, timings: Dict[str, Any]) -> None:
+    """Persist the stage timings of one shard load (caller: EngineCore)."""
+    try:
+        os.makedirs(_LOAD_TIMINGS_DIR, exist_ok=True)
+        path = os.path.join(
+            _LOAD_TIMINGS_DIR, _load_timings_key(model_path) + ".json"
+        )
+        with open(path, "w") as f:
+            json.dump({**timings, "written_at": time.time()}, f)
+    except OSError as e:
+        logger.warning(f"Failed to record load timings for {model_path}: {e}")
+
+
+def read_load_timings(
+    model_path: str, newer_than: Optional[float] = None
+) -> Dict[str, Any]:
+    """Read back the timings of the shards that make up *model_path*.
+
+    ``model_path`` is the model as the store knows it, i.e. without the local
+    storage prefix and without the ``rank_<n>`` suffix. Entries written before
+    ``newer_than`` (epoch seconds) are ignored, so a stale file left behind by
+    an earlier instance is never reported. Returns the slowest shard's
+    timings, or an empty dict when nothing fresh is available.
+    """
+    key = _load_timings_key(model_path)
+    try:
+        names = os.listdir(_LOAD_TIMINGS_DIR)
+    except OSError:
+        return {}
+
+    best: Dict[str, Any] = {}
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        shard_key = name[: -len(".json")]
+        if shard_key != key and not shard_key.startswith(key + "__"):
+            continue
+        try:
+            with open(os.path.join(_LOAD_TIMINGS_DIR, name)) as f:
+                entry = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if newer_than is not None and entry.get("written_at", 0) < newer_than:
+            continue
+        if entry.get("disk_to_vram_s") is None:
+            continue
+        if (
+            best.get("disk_to_vram_s") is None
+            or entry["disk_to_vram_s"] > best["disk_to_vram_s"]
+        ):
+            best = entry
+    return best

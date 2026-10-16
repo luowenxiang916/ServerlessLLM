@@ -1,5 +1,7 @@
 #!/bin/bash
 # ServerlessLLM 裸机集群启动脚本 (RTX 5090, uv venv 版)
+# [非当前使用] 已被单机单 worker 的 start-single.sh 取代, 此脚本仅作参考保留。
+# 当前请用: GPUS="4,5,6,7" MODEL_FOLDER=$HOME/models ./start-single.sh
 # 单机多 worker: 每个 worker 用独立回环 IP(127.0.0.N), store 监听该 IP:8073,
 # 以满足 sllm StoreManager 的 "<node_ip>:8073" 约定。
 # 用法: GPUS="4 5 6 7" ./start-cluster.sh
@@ -11,6 +13,9 @@ VENV_WORKER="$REPO/.venv-worker"
 
 GPUS="${GPUS:-4 5 6 7}"                 # 要用的物理卡号
 MODEL_FOLDER="${MODEL_FOLDER:-$HOME/models}"
+# 本地已有模型目录: 部署时优先在这里找 <org>/<model>, 找到就不去 HF 下载
+LOCAL_MODEL_ROOT="${LOCAL_MODEL_ROOT:-/ssd/nfs/models}"
+export LOCAL_MODEL_ROOT
 RAY_PORT="${RAY_PORT:-6379}"
 HEAD_IP="${HEAD_IP:-127.0.0.1}"
 API_HOST="${API_HOST:-0.0.0.0}"

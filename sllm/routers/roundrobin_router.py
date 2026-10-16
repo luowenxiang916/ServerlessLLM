@@ -97,6 +97,12 @@ class RoundRobinRouter(SllmRouter):
         self.running = False
         self.running_lock = asyncio.Lock()
 
+        # Set when `_start_instance` gives up. Without it a failed start leaves
+        # a zombie in `starting_inference_instances`, which keeps the GPUs
+        # reserved in Ray and tells the autoscaler an instance already exists,
+        # so every pending request waits forever instead of erroring out.
+        self.instance_startup_error: Optional[str] = None
+
         self.idle_time = 0
         self.idle_time_lock = asyncio.Lock()
 
@@ -156,11 +162,22 @@ class RoundRobinRouter(SllmRouter):
         await self.request_queue.put(instance_allocation)
         logger.info(f"Enqueued {action} request for model {self.model_name}")
 
-        instance_id = await instance_allocation
+        try:
+            instance_id = await instance_allocation
+        except Exception:
+            # The load balancer gave up on this request (e.g. every instance
+            # failed to start). Without this the counter stays raised forever,
+            # so the autoscaler keeps asking for an instance that never comes
+            # up and reloads the model from disk on every attempt.
+            async with self.request_count_lock:
+                self.request_count -= 1
+            raise
         logger.info(f"{request_data}, type: {type(request_data)}")
         async with self.instance_management_lock:
             if instance_id not in self.ready_inference_instances:
                 logger.error(f"Instance {instance_id} not found")
+                async with self.request_count_lock:
+                    self.request_count -= 1
                 return {"error": "Instance not found"}
             instance = self.ready_inference_instances[instance_id]
 
@@ -169,6 +186,8 @@ class RoundRobinRouter(SllmRouter):
             lora_adapter_name = request_data["lora_adapter_name"]
             if lora_adapter_name not in self.loaded_lora_adapters:
                 logger.error(f"Lora adapter {lora_adapter_name} not found")
+                async with self.request_count_lock:
+                    self.request_count -= 1
                 return {"error": f"Lora adapter {lora_adapter_name} not found"}
             await instance.backend_instance.load_lora_adapter.remote(
                 lora_name=lora_adapter_name,
@@ -306,7 +325,22 @@ class RoundRobinRouter(SllmRouter):
                         instance_options = list(
                             self.ready_inference_instances.keys()
                         )
+                        startup_error = self.instance_startup_error
+                        if not instance_options:
+                            self.instance_startup_error = None
+                    if startup_error is not None:
+                        logger.error(
+                            f"Model {self.model_name} failed to start an "
+                            f"instance: {startup_error}"
+                        )
+                        if not instance_allocation.done():
+                            instance_allocation.set_exception(
+                                RuntimeError(startup_error)
+                            )
+                        break
                     logger.info(f"{instance_options}")
+                if instance_allocation.done():
+                    break
                 logger.info(f"Got ready instances {instance_options}")
                 instance_id = instance_options[
                     round_robin_index % len(instance_options)
@@ -417,6 +451,45 @@ class RoundRobinRouter(SllmRouter):
                 logger.error(f"Instance {instance_id} not found")
                 return
             instance = self.starting_inference_instances[instance_id]
+            self.instance_startup_error = None
+        try:
+            return await self._do_start_instance(instance_id, instance)
+        except Exception as e:
+            await self._abort_instance_start(instance_id, instance, e)
+            raise
+
+    async def _abort_instance_start(self, instance_id, instance, error):
+        """Release everything a half-started instance is still holding."""
+        async with self.instance_management_lock:
+            self.starting_inference_instances.pop(instance_id, None)
+            self.instance_startup_error = (
+                f"instance {instance_id} failed to start: {error}"
+            )
+        backend_instance = getattr(instance, "backend_instance", None)
+        if backend_instance is not None:
+            # A Ray actor keeps the GPUs it was scheduled with until it dies,
+            # so a failed `init_backend` would otherwise strand them.
+            try:
+                ray.kill(backend_instance, no_restart=True)
+            except Exception as kill_error:
+                logger.error(
+                    f"Failed to kill instance {instance_id}: {kill_error}"
+                )
+        try:
+            await self.model_loading_scheduler.deallocate_resource.remote(
+                self.model_name, instance_id, self.resource_requirements
+            )
+        except Exception as dealloc_error:
+            logger.error(
+                f"Failed to deallocate resources for instance "
+                f"{instance_id}: {dealloc_error}"
+            )
+        logger.error(
+            f"Instance {instance_id} for model {self.model_name} failed to "
+            f"start and was removed: {error}"
+        )
+
+    async def _do_start_instance(self, instance_id, instance):
         # Now ask model loading scheduler to load the model
         logger.info(
             f"Allocating resources for model {self.model_name} on instance {instance_id}"

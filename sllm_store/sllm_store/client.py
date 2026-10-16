@@ -131,6 +131,25 @@ class SllmStoreClient:
                 logger.error(f"Error: {e}")
                 return False
 
+    def confirm_model_in_host(self, model_path):
+        """Wait until the disk -> host memory copy of *model_path* finished.
+
+        ``load_into_cpu`` is asynchronous on the store side, so this call is
+        what turns it into a joinable operation.
+        """
+        logger.info(f"confirm_model_in_host: {model_path}")
+        request = storage_pb2.ConfirmModelRequest(
+            model_path=model_path,
+            target_device_type=storage_pb2.DeviceType.DEVICE_TYPE_CPU,
+        )
+        try:
+            _ = self.stub.ConfirmModel(request)
+        except grpc.RpcError as e:
+            logger.error(f"Error: {e}")
+            return False
+        else:
+            return True
+
     def register_model(self, model_path) -> int:
         logger.info(f"register_model: {model_path}")
         request = storage_pb2.RegisterModelRequest(model_path=model_path)

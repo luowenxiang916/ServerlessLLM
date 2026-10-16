@@ -37,6 +37,7 @@ from sllm_store.logger import init_logger
 from sllm_store.utils import (
     calculate_device_memory,
     calculate_tensor_device_offsets,
+    record_load_timings,
 )
 
 logger = init_logger(__name__)
@@ -85,12 +86,31 @@ def load_dict(
     device_map: Dict[str, int],
     storage_path: Optional[str] = None,
 ):
+    client = SllmStoreClient("127.0.0.1:8073")
+    _t_start = time.time()
     replica_uuid, state_dict = load_dict_non_blocking(
         model_path, device_map, storage_path
     )
 
-    client = SllmStoreClient("127.0.0.1:8073")
+    # `load_dict_non_blocking` only *dispatches* the store copies, so the
+    # disk -> host stage is joined here, and `confirm_model_loaded` blocks
+    # until the host -> GPU stage of this shard finished.
+    if not client.confirm_model_in_host(model_path):
+        logger.warning(f"Failed to confirm {model_path} in host memory")
+    _t_host = time.time()
     client.confirm_model_loaded(model_path, replica_uuid)
+    _t_vram = time.time()
+
+    # Hand the stage timings to the backend actor, which runs in another
+    # process than this (vLLM EngineCore) one.
+    record_load_timings(
+        model_path,
+        {
+            "disk_to_host_s": _t_host - _t_start,
+            "mem_to_vram_s": _t_vram - _t_host,
+            "disk_to_vram_s": _t_vram - _t_start,
+        },
+    )
 
     return state_dict
 

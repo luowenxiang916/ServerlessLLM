@@ -82,8 +82,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .node{font-size:11px;text-align:center;flex:0 0 auto}
 .node .box{width:46px;height:46px;border-radius:9px;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;background:var(--chip);color:var(--muted)}
 .node.on .box{background:var(--red-soft);border-color:var(--red-line);color:var(--red);font-weight:500}
-.node .cap{margin-top:4px;color:var(--muted)}
-.arrow{flex:1;height:2px;background:var(--line);position:relative;margin:0 4px;top:-9px}
+.arrow{flex:1;height:2px;background:var(--line);position:relative;margin:0 4px}
 .arrow.live{background:var(--red)}
 .arrow .t{position:absolute;top:-15px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--red);font-variant-numeric:tabular-nums;white-space:nowrap}
 .bar{height:7px;border-radius:999px;background:var(--chip);overflow:hidden;margin-top:6px}
@@ -298,11 +297,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
       ? fmt(Math.max(0, t2 - t1)) : "—";
     $("metrics").innerHTML =
       '<div class="pipe">' +
-        '<div class="node' + (fromDisk ? " on" : "") + '"><div class="box">SSD</div><div class="cap">磁盘</div></div>' +
+        '<div class="node' + (fromDisk ? " on" : "") + '"><div class="box">SSD</div></div>' +
         '<div class="arrow ' + (fromDisk ? "live" : "") + '"><span class="t">' + (fromDisk ? fmt(t1) + "s" : "命中") + "</span></div>" +
-        '<div class="node on"><div class="box">DRAM</div><div class="cap">内存池</div></div>' +
+        '<div class="node on"><div class="box">内存</div></div>' +
         '<div class="arrow live"><span class="t">' + midArrow + "s</span></div>" +
-        '<div class="node on"><div class="box">VRAM</div><div class="cap">显存</div></div>' +
+        '<div class="node on"><div class="box">显存</div></div>' +
       "</div>" +
       '<div class="stat"><div class="k"><b>' + (fromDisk ? "① SSD → 内存" : "① 内存池") + "</b>" +
         (fromDisk ? "磁盘读入 pinned 内存池" : "命中，本次没读盘") + '</div><div class="v' + (fromDisk ? "" : " na") + '">' +

@@ -182,7 +182,7 @@ or simply send a message. Every `/v1/chat/completions` response carries:
 | --- | --- |
 | `disk_to_host_s` | SSD → pinned host memory pool (`~0` when the model is already pooled) |
 | `mem_to_vram_s` | host pool → GPU |
-| `disk_to_vram_s` | SSD → GPU, end to end |
+| `disk_to_vram_s` | weights → GPU, end to end. SSD → GPU only when `from_disk`; on a pool hit it is just `mem_to_vram_s` (the store names it after the cold-start path, the console relabels it per request) |
 | `ttft_s` | API request received → first generated token |
 | `from_disk` | `true` when this request really read from storage |
 
@@ -192,10 +192,11 @@ disk -> host and host -> VRAM chunk by chunk, which shows up in the numbers:
 
 - weights really come from SSD (`from_disk: true`): the copy to VRAM overlaps
   with the read, so `mem_to_vram_s` is close to zero and `disk_to_vram_s` is
-  the number to quote;
-- weights are already in the pinned pool (`from_disk: false`):
-  `disk_to_host_s` is the no-op and `mem_to_vram_s` is the real host -> VRAM
-  time.
+  the number to quote -- "SSD -> VRAM";
+- weights are already in the pinned pool (`from_disk: false`): nothing is read
+  from disk, `disk_to_host_s` is the no-op and "SSD -> VRAM" degenerates into
+  "DRAM -> VRAM" (`disk_to_vram_s == mem_to_vram_s`), which is what the console
+  labels it as in that case.
 
 Measured with Qwen3.6-35B-A3B (70 GB, TP=4) on the 4x RTX 5090 setup:
 

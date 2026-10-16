@@ -304,14 +304,18 @@ button:disabled{opacity:.45;cursor:not-allowed}
         '<div class="arrow live"><span class="t">' + midArrow + "s</span></div>" +
         '<div class="node on"><div class="box">VRAM</div><div class="cap">显存</div></div>' +
       "</div>" +
-      '<div class="stat"><div class="k"><b>① SSD → 内存</b>磁盘读入 pinned 内存池</div><div class="v' + (fromDisk ? "" : " na") + '">' +
+      '<div class="stat"><div class="k"><b>' + (fromDisk ? "① SSD → 内存" : "① 内存池") + "</b>" +
+        (fromDisk ? "磁盘读入 pinned 内存池" : "命中，本次没读盘") + '</div><div class="v' + (fromDisk ? "" : " na") + '">' +
         (fromDisk ? fmt(t1) + "<small>s</small>" : "命中内存") + "</div></div>" +
-      '<div class="stat"><div class="k"><b>② SSD → 显存</b>端到端冷加载</div><div class="v">' + fmt(t2) + "<small>s</small></div></div>" +
+      '<div class="stat"><div class="k"><b>② ' + (fromDisk ? "SSD → 显存" : "内存 → 显存") + "</b>" +
+        (fromDisk ? "端到端冷加载" : "权重直接落显存") + '</div><div class="v">' + fmt(t2) + "<small>s</small></div></div>" +
       '<div class="stat"><div class="k"><b>③ 首字延迟 TTFT</b>API 收到 → 第一个 token</div><div class="v">' + fmt(t3) + "<small>s</small></div></div>" +
-      '<div class="stat"><div class="k"><b>内存 → 显存</b>权重拷贝 + 组装</div><div class="v">' + fmt(m.mem_to_vram_s) + "<small>s</small></div></div>" +
+      '<div class="stat"><div class="k"><b>④ 内存 → 显存</b>' +
+        (fromDisk ? "拷贝与读盘流水线重叠，故接近 0" : "权重拷贝 + 组装") + '</div><div class="v">' +
+        fmt(m.mem_to_vram_s) + "<small>s</small></div></div>" +
       '<div class="hint" style="margin-top:10px">' +
-        (fromDisk ? "本次为真实冷启动：SSD 上读了一次。" : "本次内存池命中：没有读盘。") +
-        " TTFT 还包含 worker 实例拉起（Ray actor + 依赖导入），所以远大于 ②。" +
+        (fromDisk ? "本次为真实冷启动：权重从 SSD 读了一次。" : "本次内存池命中：权重没读盘，②就是内存 → 显存。") +
+        " TTFT 还包含实例冷启动（Ray actor + vLLM 引擎预热），所以远大于 ②。" +
       "</div>" +
       '<div class="hint" style="margin-top:6px">缓存占用（按当前驻留模型估算）</div>' +
       '<div class="bar"><span style="width:' + poolPercent() + '%"></span></div>' +
@@ -437,7 +441,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
     history.push({ role: "user", content: text });
     renderChat();
 
-    var stop = runChip("冷启动中：SSD → 内存 → 显存 → 首字…");
+    var stop = runChip("冷启动中：权重 → 显存 → 首字…");
     var messages = history.map(function (m) {
       return { role: m.role, content: m.content };
     });
@@ -466,7 +470,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       if (metrics) state.metrics[name] = metrics;
 
       var meta = metrics
-        ? ("冷启动 " + fmt(metrics.disk_to_vram_s) + "s · 首字 " + fmt(metrics.ttft_s) + "s" +
+        ? ((metrics.from_disk ? "SSD → 显存 " : "内存 → 显存 ") + fmt(metrics.disk_to_vram_s) + "s · 首字 " + fmt(metrics.ttft_s) + "s" +
            (metrics.from_disk ? " · 走了 SSD" : " · 内存池命中"))
         : null;
       if (truncated) {
@@ -530,8 +534,10 @@ button:disabled{opacity:.45;cursor:not-allowed}
       if (res.sllm_metrics) {
         state.metrics[name] = res.sllm_metrics;
         toast(name + " 冷启动完成：" +
-          (res.sllm_metrics.from_disk ? "SSD → 内存 " + fmt(res.sllm_metrics.disk_to_host_s) + "s， " : "内存池命中，") +
-          "SSD → 显存 " + fmt(res.sllm_metrics.disk_to_vram_s) + "s");
+          (res.sllm_metrics.from_disk
+            ? "SSD → 内存 " + fmt(res.sllm_metrics.disk_to_host_s) + "s，SSD → 显存"
+            : "内存池命中，内存 → 显存") +
+          " " + fmt(res.sllm_metrics.disk_to_vram_s) + "s");
       }
       renderMetrics();
       refresh();

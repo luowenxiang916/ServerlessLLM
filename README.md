@@ -139,6 +139,8 @@ curl http://127.0.0.1:8343/v1/chat/completions \
 
 ## 🖥️ Single-Machine Bare-Metal Deployment (Local Fork)
 
+> Environment versions, reproduction steps, and migration notes: [ENVIRONMENT.md](./ENVIRONMENT.md)
+
 This fork runs **without Docker** on a single bare-metal server that cold-starts
 multiple small models on a shared set of GPUs. The `Dockerfile` and
 `docker-compose.yml` in this repo are from an earlier attempt and are **not used**
